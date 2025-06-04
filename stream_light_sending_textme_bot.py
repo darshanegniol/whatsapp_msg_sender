@@ -1,59 +1,64 @@
 import streamlit as st
 import pandas as pd
 import requests
-import configparser
 import os
 import json
+from dotenv import load_dotenv
+import time
 
-PHONE = "contacts"
+PHONE = "contact"
 
-# Load configuration
-def load_config(file_path):
-    config = configparser.ConfigParser()
-    config.read(file_path)
-    return config
+# Load environment variables from .env file
+load_dotenv()
 
-# Get base dir and config.ini
-base_dir = os.path.dirname(os.path.abspath(__file__))
-config_file = os.path.join(base_dir, 'config.ini')
-config = load_config(config_file)
+# Access environment variables
+TEXTMEBOT_APIKEY = os.getenv('TEXTMEBOT_APIKEY')
+TEXTMEBOT_ENDPOINT = os.getenv('TEXTMEBOT_ENDPOINT')
+ULTRAMSG_TOKEN = os.getenv('ULTRAMSG_TOKEN')
+ULTRAMSG_MEDIA_UPLOAD_ENDPOINT = os.getenv('ULTRAMSG_MEDIA_UPLOAD_ENDPOINT')
 
 def format_phone_number(phone):
-    # Convert to string and remove non-digits
-    phone = ''.join(filter(str.isdigit, str(phone)))
-    # Take the rightmost 10 digits
-    if len(phone) >= 10:
-        return phone[-10:]
-    return None  # Return None for invalid numbers
+    try:
+        # Handle None or NaN
+        if pd.isna(phone) or phone is None:
+            return None
+        # Convert to string, remove whitespace and special characters
+        phone = str(phone).strip()
+        # Keep only digits
+        phone = ''.join(filter(str.isdigit, phone))
+        # Remove leading zeros
+        phone = phone.lstrip('0')
+        # Remove country code if present (e.g., +91 or 91)
+        if phone.startswith('91') and len(phone) >= 12:
+            phone = phone[2:]
+        elif phone.startswith('+91') and len(phone) >= 13:
+            phone = phone[3:]
+        # Validate length (10 digits for Indian numbers)
+        if len(phone) == 10:
+            return phone
+        return None
+    except Exception:
+        return None
 
 # Upload image to Ultramsg and get URL
 def upload_image_to_ultramsg(image_file):
     try:
         files = {
             'file': (image_file.name, image_file.read(), image_file.type),
-            'token': (None, config['ultramsg']['token'])
+            'token': (None, ULTRAMSG_TOKEN)
         }
         response = requests.post(
-            config['ultramsg']['ultramsg_media_upload_endpoint'],
+            ULTRAMSG_MEDIA_UPLOAD_ENDPOINT,
             files=files
         )
         
         if response.status_code == 200:
-            # Parse JSON response
             response_data = response.json()
-            # Print the entire JSON response for debugging
-            # print("Ultramsg API response:", json.dumps(response_data, indent=2))
-            # Display in Streamlit UI
-            st.write("**Ultramsg API response:**")
-            st.json(response_data)
-            
-            image_url = response_data.get('success')  # Updated to use 'success' key
+            image_url = response_data.get('success')
             if image_url:
                 return True, image_url
-            else:
-                return False, "No image URL in response (missing 'success' field)"
-        else:
-            return False, response.text
+            return False, "No image URL in response"
+        return False, response.text
     except Exception as e:
         return False, str(e)
 
@@ -61,41 +66,52 @@ def upload_image_to_ultramsg(image_file):
 def send_wa_message(to, message=None, image_url=None):
     data = {
         'recipient': to,
-        'apikey': config['textmebot']['apikey'],
+        'apikey': TEXTMEBOT_APIKEY,
     }
     if message:
         data['text'] = message
     if image_url:
         data['file'] = image_url
     
-    response = requests.post(
-        config['textmebot']['endpoint'],
-        data=data,
-        headers={'Content-Type': 'application/x-www-form-urlencoded'}
-    )
-    return response.status_code == 200, response.text
+    try:
+        response = requests.post(
+            TEXTMEBOT_ENDPOINT,
+            data=data,
+            headers={'Content-Type': 'application/x-www-form-urlencoded'}
+        )
+        return response.status_code == 200 and "Success" in response.text, response.text
+    except Exception as e:
+        return False, str(e)
 
 # Main function to send messages
 def send_messages(csv_file, message, image_file):
+    # Validate environment variables
+    if not all([TEXTMEBOT_APIKEY, TEXTMEBOT_ENDPOINT, ULTRAMSG_TOKEN, ULTRAMSG_MEDIA_UPLOAD_ENDPOINT]):
+        st.error("Missing environment variables. Check your .env file.")
+        return False, []
+
     try:
-        df = pd.read_csv(csv_file)
+        df = pd.read_csv(csv_file, encoding='utf-8', dtype=str, na_filter=False)
         if PHONE not in df.columns:
-            st.error(f"❌ CSV must contain a '{PHONE}' column.")
+            st.error("CSV must contain a 'contact' column.")
             return False, []
-        # Format phone numbers to rightmost 10 digits
+        
+        # Format phone numbers
         phone_numbers = []
         for phone in df[PHONE]:
+            if not phone or pd.isna(phone) or phone.strip() == "":
+                continue
             formatted = format_phone_number(phone)
             if formatted:
-                formatted = f"+91{formatted}"  # Adjust country code as needed
-                phone_numbers.append(formatted)
-            else:
-                st.warning(f"⚠️ Skipped invalid phone number: {phone}")
+                formatted = f"+91{formatted}"
+                if formatted not in phone_numbers:
+                    phone_numbers.append(formatted)
+
         if not phone_numbers:
-            st.error("❌ No valid phone numbers found in CSV.")
+            st.error("No valid phone numbers found in CSV.")
             return False, []
     except Exception as e:
-        st.error(f"❌ Error reading CSV: {e}")
+        st.error(f"Error reading CSV: {e}")
         return False, []
 
     results = []
@@ -103,75 +119,71 @@ def send_messages(csv_file, message, image_file):
     image_url = None
 
     # Upload image to Ultramsg if provided
-    if image_file is not None:
+    if image_file:
         filename = image_file.name
         if filename.lower().endswith(image_extensions):
-            with st.spinner("Uploading image to Ultramsg..."):
-                success, result = upload_image_to_ultramsg(image_file)
-                if success:
-                    image_url = result
-                    st.success(f"✅ Image uploaded successfully: {image_url}")
-                else:
-                    st.error(f"❌ Failed to upload image to Ultramsg: {result}")
-                    return False, []
+            success, result = upload_image_to_ultramsg(image_file)
+            if success:
+                image_url = result
+            else:
+                st.error(f"Failed to upload image to Ultramsg: {result}")
+                return False, []
         else:
-            st.error("❌ Unsupported image format. Please use PNG, JPG, JPEG, GIF, or BMP.")
+            st.error("Unsupported image format. Use PNG, JPG, JPEG, GIF, or BMP.")
             return False, []
 
-    # Send messages to each phone number
+    # Validate message content
+    message_content = message.strip() if message else ""
+    if not message_content and not image_url:
+        st.error("No valid message or image provided.")
+        return False, []
+
+    # Send messages to each phone number with 7-second delay
     for number in phone_numbers:
         try:
-            if message and message.strip() != "clear first then type your message here..." and image_url:  # Both text and image
-                success, response_text = send_wa_message(number, message.strip(), image_url)
-                action = "text and image"
-            elif message and message.strip() != "clear first then type your message here...":  # Only text
-                success, response_text = send_wa_message(number, message.strip())
-                action = "text"
-            elif image_url:  # Only image
-                success, response_text = send_wa_message(number, image_url=image_url)
-                action = "image"
-            else:
-                st.error("❌ No valid message or image provided.")
-                return False, []
-
+            success, response_text = send_wa_message(number, message_content, image_url)
             if success:
-                results.append(f"✅ Sent {action} to {number}")
+                results.append(f"Message sent successfully to {number}")
+                st.success(f"Message sent to {number}")
             else:
-                results.append(f"❌ Failed to send {action} to {number}: {response_text}")
+                results.append(f"Failed to send to {number}: {response_text}")
+                st.error(f"Failed to send message to {number}")
+            # Add 7-second of delay
+            if number != phone_numbers[-1]:  # Skip delay after last contact
+                time.sleep(7)
         except Exception as e:
-            results.append(f"❌ Error sending to {number}: {e}")
+            results.append(f"Error sending to {number}: {e}")
+            st.error(f"Error sending to {number}")
+            if number != phone_numbers[-1]:
+                time.sleep(7)
 
     return True, results
 
 # Streamlit UI
 def main():
-    st.title("WhatsApp Messaging App (TextMe Bot with Ultramsg Image Upload)")
-    st.write("Upload a CSV file with a 'contacts' column, enter a text message, and/or upload an image to send via WhatsApp. Images are uploaded via Ultramsg and sent via TextMe Bot.")
+    st.title("WhatsApp Messaging App")
+    st.write("Upload a CSV file with a 'contact' column of phone numbers. Messages (text, image, or both) will be sent to all valid contacts with a 7-second delay between each.")
 
     # File uploader for CSV
-    csv_file = st.file_uploader("Upload CSV file with phone numbers", type=["csv"])
+    csv_file = st.file_uploader("Upload CSV file", type=["csv"])
 
-    # Text input for message
-    default_message = "clear first then type your message here..."
-    message = st.text_area("Enter your message (optional)", value=default_message, height=200)
+    # Text input with placeholder
+    message = st.text_area("Message (optional)", placeholder="Enter your message here", height=200)
 
     # File uploader for image
-    image_file = st.file_uploader("Upload an image (optional)", type=["png", "jpg", "jpeg", "gif", "bmp"])
+    image_file = st.file_uploader("Upload image (optional)", type=["png", "jpg", "jpeg", "gif", "bmp"])
 
     # Send button
     if st.button("Send Messages"):
         if csv_file is None:
-            st.error("❌ Please upload a CSV file.")
+            st.error("Please upload a CSV file.")
             return
 
-        with st.spinner("Processing messages..."):
-            success, results = send_messages(csv_file, message, image_file)
-            if success:
-                st.success("Messages processed!")
-                for result in results:
-                    st.write(result)
-            else:
-                st.error("Failed to process messages. Check the error messages above.")
+        success, results = send_messages(csv_file, message, image_file)
+        if success:
+            st.success("All messages processed!")
+        else:
+            st.error("Failed to process messages. Check errors above.")
 
 if __name__ == "__main__":
     main()
