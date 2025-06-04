@@ -14,7 +14,7 @@ def load_config(file_path):
     return config
 
 # Get base dir and config.ini
-base_dir = os.path.dirname(os.path.abspath(__file__))
+base_dir = os.path.dirname(os.path.abspath( __file__))
 config_file = os.path.join(base_dir, 'config.ini')
 config = load_config(config_file)
 
