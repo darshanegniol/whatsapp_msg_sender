@@ -503,6 +503,14 @@ def upload_document_to_ultramsg(document_file):
 
 # Send WhatsApp message using TextMeBot API
 def send_wa_message(to, message=None, image_url=None, document_url=None, document_filename=None):
+    # Validate inputs
+    if not to:
+        return False, "Missing required parameter: recipient phone number", None
+    if not TEXTMEBOT_APIKEY:
+        return False, "Missing required parameter: API key", None
+    if not message and not image_url and not document_url:
+        return False, "Missing required content: message, image, or document", None
+
     data = {
         'recipient': to,
         'apikey': TEXTMEBOT_APIKEY,
@@ -522,9 +530,37 @@ def send_wa_message(to, message=None, image_url=None, document_url=None, documen
             data=data,
             headers={'Content-Type': 'application/x-www-form-urlencoded'}
         )
-        return response.status_code == 200 and "Success" in response.text, response.text
+        response_text = response.text
+        # Parse response to provide specific error messages
+        if response.status_code == 200 and "Success" in response_text:
+            return True, "Message sent successfully", response_text
+        else:
+            # Try to parse JSON response for specific errors
+            try:
+                response_data = response.json()
+                error_message = response_data.get('error', response_data.get('message', response_text))
+                if "invalid phone number" in error_message.lower() or "recipient" in error_message.lower():
+                    return False, "Invalid phone number", response_text
+                elif "api key" in error_message.lower():
+                    return False, "Invalid or missing API key", response_text
+                elif "rate limit" in error_message.lower():
+                    return False, "API rate limit exceeded", response_text
+                elif "parameter" in error_message.lower():
+                    return False, f"Missing or invalid parameter: {error_message}", response_text
+                else:
+                    return False, f"API error: {error_message}", response_text
+            except ValueError:
+                # Non-JSON response
+                if "invalid phone number" in response_text.lower():
+                    return False, "Invalid phone number", response_text
+                elif "api key" in response_text.lower():
+                    return False, "Invalid or missing API key", response_text
+                elif "rate limit" in response_text.lower():
+                    return False, "API rate limit exceeded", response_text
+                else:
+                    return False, f"API error: {response_text}", response_text
     except Exception as e:
-        return False, str(e)
+        return False, f"Network or API connection error: {str(e)}", str(e)
 
 # Main function to send messages
 def send_messages(csv_file, message, image_file, document_file):
@@ -550,6 +586,7 @@ def send_messages(csv_file, message, image_file, document_file):
         
         # Format phone numbers
         phone_numbers = []
+        invalid_numbers = []
         for phone in df[PHONE]:
             if not phone or pd.isna(phone) or phone.strip() == "":
                 continue
@@ -558,7 +595,12 @@ def send_messages(csv_file, message, image_file, document_file):
                 formatted = f"+91{formatted}"
                 if formatted not in phone_numbers:
                     phone_numbers.append(formatted)
+            else:
+                invalid_numbers.append(phone)
 
+        if invalid_numbers:
+            st.error(f"Invalid phone numbers found: {', '.join(invalid_numbers)}")
+        
         if not phone_numbers:
             st.error("No valid phone numbers found in CSV.")
             return False, [], [], []
@@ -610,19 +652,19 @@ def send_messages(csv_file, message, image_file, document_file):
     # Send messages to each phone number with 7-second delay
     for index, number in enumerate(phone_numbers):
         try:
-            success, response_text = send_wa_message(number, message_content, image_url, document_url, document_filename)
+            success, error_message, response_text = send_wa_message(number, message_content, image_url, document_url, document_filename)
             if success:
                 st.success(f"Message sent successfully to {number}")
                 successful_numbers.append(number)
             else:
-                st.error(f"Failed to send message to {number}. Reason: {response_text}")
+                st.error(f"Failed to send message to {number}. Reason: {error_message}")
                 failed_numbers.append(number)
             # Add 7-second delay with message
             if index < len(phone_numbers) - 1:  # Skip delay after last contact
                 with st.spinner("Waiting 7 seconds before sending to the next contact..."):
                     time.sleep(7)
         except Exception as e:
-            st.error(f"Failed to send message to {number}. Reason: {str(e)}")
+            st.error(f"Failed to send message to {number}. Reason: Unexpected error: {str(e)}")
             failed_numbers.append(number)
             if index < len(phone_numbers) - 1:
                 with st.spinner("Waiting 7 seconds before sending to the next contact..."):
