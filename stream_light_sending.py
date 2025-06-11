@@ -85,7 +85,7 @@ def send_messages(csv_file, message, image_file):
             formatted = format_phone_number(phone)
             if formatted:
                 # Optionally prepend country code (e.g., +91 for India)
-                formatted = f"+91{formatted}"  # Adjust country code as needed
+                formatted = f"{formatted}"  # Adjust country code as needed
                 phone_numbers.append(formatted)
             else:
                 st.warning(f"⚠️ Skipped invalid phone number: {phone}")
